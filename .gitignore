@@ -1,3 +1,34 @@
+# ROS 2 build artifacts
 **/build/
-**/log/
 **/install/
+**/log/
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+**/.eggs/
+
+# CMake / colcon
+**/CMakeCache.txt
+**/CMakeFiles/
+**/cmake_install.cmake
+**/Makefile
+**/.colcon/
+
+# IDEs
+**/.vscode/
+**/.idea/
+**/cmake-build-*/
+**/*.user
+**/*.user.*
+
+# OS
+**/.DS_Store
+**/*~
+**/Thumbs.db
+
+# ROS data
+**/*.db3
+**/*.mcap

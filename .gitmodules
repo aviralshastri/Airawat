@@ -1,0 +1,6 @@
+[submodule "airawat_ws/src/cartographer"]
+	path = airawat_ws/src/cartographer
+	url = https://github.com/aviralshastri/cartographer.git
+[submodule "airawat_ws/src/ydlidar_ros2_driver"]
+	path = airawat_ws/src/ydlidar_ros2_driver
+	url = https://github.com/aviralshastri/ydlidar_ros2_driver.git
