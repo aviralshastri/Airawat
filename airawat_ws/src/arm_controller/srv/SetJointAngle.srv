@@ -1,0 +1,8 @@
+# Request
+float64 angle
+float64 duration
+string smoothing_type  # "QUINTIC" or "CUBIC" (default: "CUBIC")
+---
+# Response
+bool success
+string message

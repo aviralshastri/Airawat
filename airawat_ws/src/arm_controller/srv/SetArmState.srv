@@ -1,0 +1,7 @@
+# Request
+string state  # "IDEAL", "DIG", or "DUMP"
+string smoothing_type  # "QUINTIC" or "CUBIC" (default: "CUBIC")
+---
+# Response
+bool success
+string message

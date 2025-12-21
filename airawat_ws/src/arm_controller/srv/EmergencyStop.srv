@@ -1,0 +1,6 @@
+# Request
+# (empty)
+---
+# Response
+bool success
+string message
