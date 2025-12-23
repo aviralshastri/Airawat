@@ -26,7 +26,8 @@ setup(
         'console_scripts': [
             'servo_interface = hardware_interfaces.servo_interface:main',
             'rc_interface = hardware_interfaces.rc_interface:main',
-            'drive_interface = hardware_interfaces.drive_interface:main'
+            'drive_interface = hardware_interfaces.drive_interface:main',
+            'imu_interface = hardware_interfaces.imu_interface:main'
         ],
     },
 )

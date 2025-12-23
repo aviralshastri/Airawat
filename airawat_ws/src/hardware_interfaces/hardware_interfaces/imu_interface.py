@@ -19,9 +19,9 @@ ACC_200HZ = (0b000 << 5) | (0b011 << 2) | 0b10
 GYRO_200HZ = (0b00111 << 3) | 0b000
 
 
-class BNO055Publisher(Node):
+class IMUInterface(Node):
     def __init__(self):
-        super().__init__('bno055_imu_pub')
+        super().__init__('imu_interface')
 
         # Sensor data QoS profile for better performance
         qos = QoSProfile(
@@ -126,7 +126,7 @@ def main(args=None):
     rclpy.init(args=args)
     
     try:
-        node = BNO055Publisher()
+        node = IMUInterface()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
