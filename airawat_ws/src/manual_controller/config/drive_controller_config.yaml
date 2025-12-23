@@ -1,0 +1,19 @@
+drive_controller:
+  ros__parameters:
+    # Order of motors in published Float32MultiArray
+    topic_sequence: ["back_left", "back_right", "front_left", "front_right"]
+    
+    # Output throttle range
+    throttle_range: [-1.0, 1.0]  # min, max
+    
+    # Topic to publish motor commands
+    topic_name: "motor_control"
+    
+    # Expected PWM range from RC receiver
+    pwm_range: [1000, 2000]  # min, max
+    
+    # Channel mapping from RC input array
+    channels_sequence: ["roll", "pitch", "throttle", "yaw", "var", "mode"]
+    
+    # RC input topic
+    rc_topic: "rc_input"

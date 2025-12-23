@@ -1,0 +1,11 @@
+drive_interface:
+  ros__parameters:
+    front_left: 0
+    front_right: 1
+    back_left: 2
+    back_right: 3
+
+    servo_min_pwm: 1000
+    servo_max_pwm: 2000
+
+    topic_sequence: ["back_left","back_right","front_left","front_right"]

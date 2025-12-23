@@ -1,0 +1,8 @@
+servo_interface:
+  ros__parameters:
+    wrist: 4
+    shoulder: 5
+    elbow: 6
+
+    servo_min_pwm: 500
+    servo_max_pwm: 2500
