@@ -38,15 +38,16 @@ class DriveInterface(Node):
         try:
             self.kit = ServoKit(channels=16)
             
-            # Configure each motor as continuous servo with PWM range
+            # Configure each motor as standard servo with PWM range
             for motor_name, channel in self.motor_indices.items():
-                self.kit.continuous_servo[channel].set_pulse_width_range(self.min_pwm, self.max_pwm)
-                # Initialize to neutral (stopped)
-                self.kit.continuous_servo[channel].throttle = 0
+                self.kit.servo[channel].set_pulse_width_range(self.min_pwm, self.max_pwm)
+                # Initialize to neutral position (90 degrees)
+                self.kit.servo[channel].angle = 90
             
             self.get_logger().info('ServoKit initialized successfully')
             self.get_logger().info(f'Motor mapping: {self.motor_indices}')
             self.get_logger().info(f'Topic sequence: {self.topic_sequence}')
+            self.get_logger().info(f'PWM range: {self.min_pwm} to {self.max_pwm}')
             
         except Exception as e:
             self.get_logger().error(f'Failed to initialize ServoKit: {e}')
@@ -86,6 +87,25 @@ class DriveInterface(Node):
         
         return mapping
     
+    def map_to_servo_angle(self, value):
+        """
+        Maps a float value from range [-1, 1] to an integer in range [0, 180].
+        
+        Args:
+            value: Float value between -1 and 1
+            
+        Returns:
+            Integer value between 0 and 180
+        """
+        # Clamp the input to ensure it's within [-1, 1]
+        clamped = max(-1.0, min(1.0, value))
+        
+        # Map from [-1, 1] to [0, 180]
+        # Formula: ((input - input_min) / (input_max - input_min)) * (output_max - output_min) + output_min
+        mapped = ((clamped - (-1)) / (1 - (-1))) * (180 - 0) + 0
+        
+        return int(mapped)
+    
     def motor_callback(self, msg):
         """Process incoming motor control commands"""
         if len(msg.data) != len(self.topic_sequence):
@@ -94,29 +114,29 @@ class DriveInterface(Node):
             )
             return
         
-        # Set throttle directly for each motor based on sequence mapping
-        # Input: throttle values from -1.0 to 1.0
-        for seq_idx, throttle in enumerate(msg.data):
+        # Set angle for each motor based on sequence mapping
+        # Input: values from -1.0 to 1.0, mapped to servo angles [0, 180]
+        for seq_idx, value in enumerate(msg.data):
             if seq_idx in self.sequence_to_channel:
                 channel = self.sequence_to_channel[seq_idx]
                 
-                # Clamp throttle to valid range
-                throttle = max(-1.0, min(1.0, throttle))
+                # Map the value from [-1, 1] to servo angle [0, 180]
+                angle = self.map_to_servo_angle(value)
                 
                 try:
-                    self.kit.continuous_servo[channel].throttle = throttle
+                    self.kit.servo[channel].angle = angle
                 except Exception as e:
                     self.get_logger().error(f'Failed to set motor {channel}: {e}')
     
     def destroy_node(self):
-        """Stop all motors on shutdown"""
-        self.get_logger().info('Stopping all motors...')
+        """Return all servos to neutral position on shutdown"""
+        self.get_logger().info('Returning all servos to neutral position...')
         
         try:
             for channel in self.motor_indices.values():
-                self.kit.continuous_servo[channel].throttle = 0
+                self.kit.servo[channel].angle = 90
         except Exception as e:
-            self.get_logger().error(f'Error stopping motors: {e}')
+            self.get_logger().error(f'Error resetting servos: {e}')
         
         super().destroy_node()
 
