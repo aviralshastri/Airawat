@@ -3,93 +3,196 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
+from sensor_msgs.msg import JointState
 from adafruit_servokit import ServoKit
 import sys
+import time
 
 
 class DriveInterface(Node):
     def __init__(self):
         super().__init__('drive_interface')
         
-        # Declare parameters
-        self.declare_parameter('front_left', 0)
-        self.declare_parameter('front_right', 1)
-        self.declare_parameter('back_left', 2)
-        self.declare_parameter('back_right', 3)
-        self.declare_parameter('servo_min_pwm', 1000)
-        self.declare_parameter('servo_max_pwm', 2000)
-        self.declare_parameter('topic_sequence', ['left_back', 'right_back', 'left_front', 'right_front'])
-        self.declare_parameter('topic_name', 'motor_control')
+        # Declare nested parameters for channel indices
+        self.declare_parameter('channel_index.front_left', 0)
+        self.declare_parameter('channel_index.front_right', 1)
+        self.declare_parameter('channel_index.back_left', 2)
+        self.declare_parameter('channel_index.back_right', 3)
+        self.declare_parameter('channel_index.wrist', 4)
+        self.declare_parameter('channel_index.shoulder', 5)
         
-        # Get parameters
-        self.motor_indices = {
-            'front_left': self.get_parameter('front_left').value,
-            'front_right': self.get_parameter('front_right').value,
-            'back_left': self.get_parameter('back_left').value,
-            'back_right': self.get_parameter('back_right').value
+        # Declare nested parameters for servo init angles
+        self.declare_parameter('servo_init_angle.wrist', 90)
+        self.declare_parameter('servo_init_angle.shoulder', 180)
+        
+        # Declare PWM parameters
+        self.declare_parameter('servo_min_pwm', 500)
+        self.declare_parameter('servo_max_pwm', 2500)
+        self.declare_parameter('drive_min_pwm', 1000)
+        self.declare_parameter('drive_max_pwm', 2000)
+        
+        # Declare topic parameters
+        self.declare_parameter('drive_topic_sequence', ['back_left', 'back_right', 'front_left', 'right_front'])
+        self.declare_parameter('servo_topic_sequence', ['wrist', 'shoulder'])
+        self.declare_parameter('drive_topic_name', 'motor_control')
+        self.declare_parameter('servo_topic_name', 'arm_angles')
+        
+        # Declare actuation and init service parameters
+        self.declare_parameter('max_actuation_angle', 180)
+        self.declare_parameter('init_duration', 10.0)
+        self.declare_parameter('init_smoothing_type', 'CUBIC')
+        
+        # Get channel indices
+        self.channel_index = {
+            'front_left': self.get_parameter('channel_index.front_left').value,
+            'front_right': self.get_parameter('channel_index.front_right').value,
+            'back_left': self.get_parameter('channel_index.back_left').value,
+            'back_right': self.get_parameter('channel_index.back_right').value,
+            'wrist': self.get_parameter('channel_index.wrist').value,
+            'shoulder': self.get_parameter('channel_index.shoulder').value,
         }
         
-        self.min_pwm = self.get_parameter('servo_min_pwm').value
-        self.max_pwm = self.get_parameter('servo_max_pwm').value
-        self.topic_sequence = self.get_parameter('topic_sequence').value
-        topic_name = self.get_parameter('topic_name').value
+        # Get servo init angles
+        self.servo_init_angle = {
+            'wrist': self.get_parameter('servo_init_angle.wrist').value,
+            'shoulder': self.get_parameter('servo_init_angle.shoulder').value,
+        }
+        
+        # Get PWM ranges
+        self.servo_min_pwm = self.get_parameter('servo_min_pwm').value
+        self.servo_max_pwm = self.get_parameter('servo_max_pwm').value
+        self.drive_min_pwm = self.get_parameter('drive_min_pwm').value
+        self.drive_max_pwm = self.get_parameter('drive_max_pwm').value
+        
+        # Get topic parameters
+        self.drive_topic_sequence = self.get_parameter('drive_topic_sequence').value
+        self.servo_topic_sequence = self.get_parameter('servo_topic_sequence').value
+        self.drive_topic_name = self.get_parameter('drive_topic_name').value
+        self.servo_topic_name = self.get_parameter('servo_topic_name').value
+        
+        # Get actuation parameters
+        self.max_actuation_angle = self.get_parameter('max_actuation_angle').value
+        self.init_duration = self.get_parameter('init_duration').value
+        self.init_smoothing_type = self.get_parameter('init_smoothing_type').value
+        
+        # Separate drive motors and servo arms
+        self.drive_motors = ['front_left', 'front_right', 'back_left', 'back_right']
+        self.servo_arms = ['wrist', 'shoulder']
         
         # Initialize ServoKit (PCA9685 - 16 channels)
         try:
             self.kit = ServoKit(channels=16)
             
-            # Configure each motor as standard servo with PWM range
-            for motor_name, channel in self.motor_indices.items():
-                self.kit.servo[channel].set_pulse_width_range(self.min_pwm, self.max_pwm)
+            # Configure drive motors with drive PWM range
+            for motor_name in self.drive_motors:
+                channel = self.channel_index[motor_name]
+                self.kit.servo[channel].set_pulse_width_range(self.drive_min_pwm, self.drive_max_pwm)
                 # Initialize to neutral position (90 degrees)
                 self.kit.servo[channel].angle = 90
             
+            # Configure servo arms with servo PWM range and actuation range
+            for servo_name in self.servo_arms:
+                channel = self.channel_index[servo_name]
+                self.kit.servo[channel].set_pulse_width_range(self.servo_min_pwm, self.servo_max_pwm)
+                self.kit.servo[channel].actuation_range = self.max_actuation_angle
+            
             self.get_logger().info('ServoKit initialized successfully')
-            self.get_logger().info(f'Motor mapping: {self.motor_indices}')
-            self.get_logger().info(f'Topic sequence: {self.topic_sequence}')
-            self.get_logger().info(f'PWM range: {self.min_pwm} to {self.max_pwm}')
+            self.get_logger().info(f'Drive motors mapping: {[(m, self.channel_index[m]) for m in self.drive_motors]}')
+            self.get_logger().info(f'Servo arms mapping: {[(s, self.channel_index[s]) for s in self.servo_arms]}')
+            self.get_logger().info(f'Drive PWM range: {self.drive_min_pwm} to {self.drive_max_pwm}')
+            self.get_logger().info(f'Servo PWM range: {self.servo_min_pwm} to {self.servo_max_pwm}')
+            self.get_logger().info(f'Servo actuation range: 0 to {self.max_actuation_angle}')
             
         except Exception as e:
             self.get_logger().error(f'Failed to initialize ServoKit: {e}')
             sys.exit(1)
         
-        # Create mapping from topic sequence to motor channels
-        self.sequence_to_channel = self._create_sequence_mapping()
+        # Create mapping from drive topic sequence to motor channels
+        self.drive_sequence_to_channel = self._create_drive_sequence_mapping()
         
-        # Subscribe to motor control topic
-        self.subscription = self.create_subscription(
+        # Subscribe to drive motor control topic
+        self.drive_subscription = self.create_subscription(
             Float32MultiArray,
-            topic_name,
-            self.motor_callback,
+            self.drive_topic_name,
+            self.drive_motor_callback,
             10
         )
         
-        self.get_logger().info(f'Subscribed to {topic_name}')
-        self.get_logger().info(f'Channel mapping: {self.sequence_to_channel}')
+        # Subscribe to servo arm angles topic (JointState)
+        self.servo_subscription = self.create_subscription(
+            JointState,
+            self.servo_topic_name,
+            self.servo_callback,
+            10
+        )
+        
+        # Publisher for servo angles (for debugging/monitoring)
+        self.angle_pub = self.create_publisher(
+            Float32MultiArray,
+            'servo_angles_debug',
+            10
+        )
+        
+        self.get_logger().info(f'Subscribed to drive topic: {self.drive_topic_name}')
+        self.get_logger().info(f'Subscribed to servo topic: {self.servo_topic_name}')
+        self.get_logger().info(f'Drive channel mapping: {self.drive_sequence_to_channel}')
+        
+        # Wait a bit for subscriptions to be established
+        time.sleep(1.0)
+        
+        # Call initialization services for servo arms
+        self._initialize_servo_arms()
     
-    def _create_sequence_mapping(self):
-        """Create mapping from topic sequence index to motor channel"""
+    def _create_drive_sequence_mapping(self):
+        """Create mapping from drive topic sequence index to motor channel"""
         mapping = {}
         
-        # Map topic sequence names to actual motor channel indices
-        name_to_channel = {
-            'back_left': self.motor_indices['back_left'],
-            'back_right': self.motor_indices['back_right'],
-            'front_left': self.motor_indices['front_left'],
-            'front_right': self.motor_indices['front_right']
-        }
-        
-        for idx, motor_name in enumerate(self.topic_sequence):
-            if motor_name in name_to_channel:
-                mapping[idx] = name_to_channel[motor_name]
+        for idx, motor_name in enumerate(self.drive_topic_sequence):
+            if motor_name in self.channel_index and motor_name in self.drive_motors:
+                mapping[idx] = self.channel_index[motor_name]
             else:
-                self.get_logger().warn(f'Unknown motor name in sequence: {motor_name}')
+                self.get_logger().warn(f'Unknown motor name in drive sequence: {motor_name}')
         
         return mapping
+    
+    def _initialize_servo_arms(self):
+        """Call services to initialize servo arms to their init positions"""
+        self.get_logger().info('Initializing servo arms...')
+        
+        # Import service type
+        try:
+            from arm_controller.srv import SetJointAngle
+        except ImportError:
+            self.get_logger().error('Failed to import SetJointAngle service. Make sure arm_controller package is available.')
+            return
+        
+        # Create service clients
+        clients = {}
+        for servo_name in self.servo_arms:
+            service_name = f'/set_{servo_name}_angle'
+            clients[servo_name] = self.create_client(SetJointAngle, service_name)
+            
+            # Wait for service to be available
+            if not clients[servo_name].wait_for_service(timeout_sec=5.0):
+                self.get_logger().warn(f'Service {service_name} not available, skipping initialization for {servo_name}')
+                continue
+            
+            # Create request
+            request = SetJointAngle.Request()
+            request.angle = float(self.servo_init_angle[servo_name])
+            request.duration = float(self.init_duration)
+            request.smoothing_type = self.init_smoothing_type
+            
+            # Call service asynchronously
+            future = clients[servo_name].call_async(request)
+            self.get_logger().info(f'Called {service_name} with angle={request.angle}, duration={request.duration}, smoothing={request.smoothing_type}')
+        
+        self.get_logger().info('Servo arm initialization services called')
     
     def map_to_servo_angle(self, value):
         """
         Maps a float value from range [-1, 1] to an integer in range [0, 180].
+        Used for drive motors only.
         
         Args:
             value: Float value between -1 and 1
@@ -101,42 +204,82 @@ class DriveInterface(Node):
         clamped = max(-1.0, min(1.0, value))
         
         # Map from [-1, 1] to [0, 180]
-        # Formula: ((input - input_min) / (input_max - input_min)) * (output_max - output_min) + output_min
         mapped = ((clamped - (-1)) / (1 - (-1))) * (180 - 0) + 0
         
         return int(mapped)
     
-    def motor_callback(self, msg):
-        """Process incoming motor control commands"""
-        if len(msg.data) != len(self.topic_sequence):
+    def drive_motor_callback(self, msg):
+        """Process incoming drive motor control commands"""
+        if len(msg.data) != len(self.drive_topic_sequence):
             self.get_logger().warn(
-                f'Expected {len(self.topic_sequence)} values, got {len(msg.data)}'
+                f'Expected {len(self.drive_topic_sequence)} values, got {len(msg.data)}'
             )
             return
         
-        # Set angle for each motor based on sequence mapping
+        # Store mapped angles for publishing
+        mapped_angles = []
+        
+        # Set angle for each drive motor based on sequence mapping
         # Input: values from -1.0 to 1.0, mapped to servo angles [0, 180]
         for seq_idx, value in enumerate(msg.data):
-            if seq_idx in self.sequence_to_channel:
-                channel = self.sequence_to_channel[seq_idx]
+            if seq_idx in self.drive_sequence_to_channel:
+                channel = self.drive_sequence_to_channel[seq_idx]
                 
                 # Map the value from [-1, 1] to servo angle [0, 180]
                 angle = self.map_to_servo_angle(value)
+                mapped_angles.append(float(angle))
                 
                 try:
                     self.kit.servo[channel].angle = angle
                 except Exception as e:
-                    self.get_logger().error(f'Failed to set motor {channel}: {e}')
+                    self.get_logger().error(f'Failed to set drive motor {channel}: {e}')
+            else:
+                mapped_angles.append(0.0)
+        
+        # Publish debug info
+        angle_msg = Float32MultiArray()
+        angle_msg.data = mapped_angles
+        self.angle_pub.publish(angle_msg)
+    
+    def servo_callback(self, msg):
+        """Process incoming servo arm angle commands from JointState message"""
+        # Parse JointState message
+        for i, joint_name in enumerate(msg.name):
+            # Check if this joint is in our servo arms list
+            if joint_name in self.servo_arms:
+                if i < len(msg.position):
+                    angle = msg.position[i]
+                    
+                    # Clamp angle to max actuation range
+                    clamped_angle = max(0.0, min(float(self.max_actuation_angle), angle))
+                    
+                    # Get channel for this servo
+                    channel = self.channel_index[joint_name]
+                    
+                    try:
+                        self.kit.servo[channel].angle = clamped_angle
+                        self.get_logger().debug(f'Set {joint_name} (channel {channel}) to {clamped_angle}°')
+                    except Exception as e:
+                        self.get_logger().error(f'Failed to set servo {joint_name} (channel {channel}): {e}')
     
     def destroy_node(self):
-        """Return all servos to neutral position on shutdown"""
-        self.get_logger().info('Returning all servos to neutral position...')
+        """Return all motors to neutral position on shutdown"""
+        self.get_logger().info('Returning all motors to neutral position...')
         
         try:
-            for channel in self.motor_indices.values():
+            # Reset drive motors to 90 degrees
+            for motor_name in self.drive_motors:
+                channel = self.channel_index[motor_name]
                 self.kit.servo[channel].angle = 90
+            
+            # Keep servo arms at their current position (don't reset)
+            # If you want to reset them, uncomment below:
+            # for servo_name in self.servo_arms:
+            #     channel = self.channel_index[servo_name]
+            #     self.kit.servo[channel].angle = self.servo_init_angle[servo_name]
+            
         except Exception as e:
-            self.get_logger().error(f'Error resetting servos: {e}')
+            self.get_logger().error(f'Error resetting motors: {e}')
         
         super().destroy_node()
 

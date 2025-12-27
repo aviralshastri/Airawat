@@ -1,12 +1,33 @@
 drive_interface:
   ros__parameters:
-    front_left: 3
-    front_right: 2
-    back_left: 1
-    back_right: 0
+    
+    channel_index:
+      front_left: 0
+      front_right: 1
+      back_left: 2
+      back_right: 3
+      wrist: 4
+      shoulder: 5
 
-    servo_min_pwm: 1000
-    servo_max_pwm: 2000
+    servo_init_angle:
+      wrist: 90
+      shoulder: 180
+    
+    servo_min_pwm: 500
+    servo_max_pwm: 2500
 
-    topic_sequence: ["back_left","back_right","front_left","front_right"]
-    topic_name: "motor_control"
+    drive_min_pwm: 1000
+    drive_max_pwm: 2000
+
+    drive_topic_sequence: ["back_left","back_right","front_left","front_right"]
+
+    servo_topic_sequence: ["wrist","shoulder"]
+
+    drive_topic_name: "motor_control"
+
+    servo_topic_name: "arm_angles"
+    
+    max_actuation_angle: 180
+    
+    init_duration: 2.0
+    init_smoothing_type: 'CUBIC'
