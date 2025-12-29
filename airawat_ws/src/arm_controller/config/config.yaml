@@ -31,25 +31,21 @@
     
     # Duration for transitioning between different arm states (seconds)
     # This is used when moving from current position to the first state of a sequence
-    state_transition_duration: 2.0
+    state_transition_duration: 5.0
     
     # Publishing rate for joint commands (Hz)
     publish_rate: 100.0
     
-    ideal_states:
+    ideal_states:      
+    
       state_1:
-        angles: [0.0, 0.0]           # [wrist, shoulder] in degrees
-        durations: [2.0, 2.0]         # Time to reach each joint angle
-        delay: 0.5                    # Wait time after reaching this state (seconds)
-      
-      state_2:
-        angles: [10.0, 10.0]
-        durations: [1.5, 1.5]
-        delay: 0.0                    # No delay after final state
+        angles: [180.0, 180.0]
+        durations: [5.0, 5.0]
+        delay: 1.0                    # No delay after final state
 
     dig_states:
       state_1:
-        angles: [20.0, 30.0]          # Initial dig position
+        angles: [180.0, 30.0]          # Initial dig position
         durations: [2.0, 2.0]
         delay: 0.5
       

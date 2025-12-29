@@ -2,42 +2,50 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import UInt16MultiArray, Float32MultiArray
+from std_msgs.msg import UInt16MultiArray
+from arm_controller.srv import SetArmState  
 
-
-class DriveController(Node):
+class ModeController(Node):
     def __init__(self):
-        super().__init__('drive_controller')
+        super().__init__('mode_controller')
         
         # Declare parameters
-        self.declare_parameter('topic_sequence', ['back_left', 'back_right', 'front_left', 'front_right'])
-        self.declare_parameter('throttle_range', [-1.0, 1.0])
-        self.declare_parameter('topic_name', 'motor_control')
-        self.declare_parameter('pwm_range', [1000, 2000])
-        self.declare_parameter('channels_sequence', ['pitch', 'throttle', 'yaw', 'roll', 'var', 'mode'])
         self.declare_parameter('rc_topic', 'rc_input')
+        self.declare_parameter('channels_sequence', ['pitch', 'throttle', 'yaw', 'roll', 'var', 'mode'])
+        self.declare_parameter('pwm_range', [1000, 2000])
+        self.declare_parameter('mode_service_name', 'set_mode')
+        self.declare_parameter('smoothing_type', 'CUBIC')  # Default smoothing type
+        self.declare_parameter('deadband_margin', 50)  # PWM units for deadband around boundaries
         
         # Get parameters
-        self.motor_sequence = self.get_parameter('topic_sequence').value
-        self.throttle_range = self.get_parameter('throttle_range').value
-        self.topic_name = self.get_parameter('topic_name').value
-        self.pwm_range = self.get_parameter('pwm_range').value
-        self.channels_sequence = self.get_parameter('channels_sequence').value
         rc_topic = self.get_parameter('rc_topic').value
+        self.channels_sequence = self.get_parameter('channels_sequence').value
+        self.pwm_range = self.get_parameter('pwm_range').value
+        mode_service_name = self.get_parameter('mode_service_name').value
+        self.smoothing_type = self.get_parameter('smoothing_type').value
+        self.deadband_margin = self.get_parameter('deadband_margin').value
         
-        # Find indices for roll and pitch in channels_sequence
+        # Find index for mode channel
         try:
-            self.roll_idx = self.channels_sequence.index('roll')
-            self.pitch_idx = self.channels_sequence.index('pitch')
+            self.mode_idx = self.channels_sequence.index('mode')
         except ValueError as e:
-            self.get_logger().error(f'roll or pitch not found in channels_sequence: {e}')
+            self.get_logger().error(f'mode not found in channels_sequence: {e}')
             raise
         
-        # PWM neutral point
-        self.pwm_neutral = (self.pwm_range[0] + self.pwm_range[1]) / 2.0
+        # Define mode states
+        self.modes = ['IDEAL', 'DIG', 'DUMP']
+        self.current_mode = None
         
-        # Publisher for motor control
-        self.motor_pub = self.create_publisher(Float32MultiArray, self.topic_name, 10)
+        # Calculate PWM thresholds for 3 positions with deadband
+        self.calculate_mode_thresholds()
+        
+        # Service client for mode switching
+        self.mode_client = self.create_client(ModeSwitch, mode_service_name)
+        
+        # Wait for service to be available
+        self.get_logger().info(f'Waiting for service: {mode_service_name}')
+        while not self.mode_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info(f'Service {mode_service_name} not available, waiting...')
         
         # Subscriber for RC input
         self.rc_sub = self.create_subscription(
@@ -47,93 +55,112 @@ class DriveController(Node):
             10
         )
         
-        self.get_logger().info(f'Drive controller initialized')
+        self.get_logger().info('Mode controller initialized')
         self.get_logger().info(f'Subscribing to RC: {rc_topic}')
-        self.get_logger().info(f'Publishing to motors: {self.topic_name}')
-        self.get_logger().info(f'Motor sequence: {self.motor_sequence}')
-        self.get_logger().info(f'Roll index: {self.roll_idx}, Pitch index: {self.pitch_idx}')
+        self.get_logger().info(f'Mode channel index: {self.mode_idx}')
+        self.get_logger().info(f'PWM range: {self.pwm_range}')
+        self.get_logger().info(f'Mode thresholds: {self.mode_thresholds}')
+        self.get_logger().info(f'Smoothing type: {self.smoothing_type}')
     
-    def pwm_to_normalized(self, pwm_value):
+    def calculate_mode_thresholds(self):
         """
-        Convert PWM value to normalized range [-1.0, 1.0]
-        PWM range: [min, max] -> [-1.0, 1.0]
-        Neutral (center) -> 0.0
+        Calculate PWM thresholds for 3 modes with deadband margins
+        Divides the PWM range into 3 equal zones with deadband around boundaries
         """
-        # Clamp PWM to valid range
-        pwm_value = max(self.pwm_range[0], min(self.pwm_range[1], pwm_value))
+        pwm_min = self.pwm_range[0]
+        pwm_max = self.pwm_range[1]
+        pwm_span = pwm_max - pwm_min
         
-        # Normalize to [-1.0, 1.0] with neutral at center
-        normalized = (pwm_value - self.pwm_neutral) / (self.pwm_range[1] - self.pwm_neutral)
+        # Divide into 3 equal zones
+        zone_size = pwm_span / 3.0
         
-        return normalized
+        # Calculate boundary points
+        boundary1 = pwm_min + zone_size
+        boundary2 = pwm_min + 2 * zone_size
+        
+        # Create thresholds with deadband
+        # Format: [(lower_bound, upper_bound), ...]
+        self.mode_thresholds = [
+            (pwm_min, boundary1 - self.deadband_margin),  # IDEAL zone
+            (boundary1 + self.deadband_margin, boundary2 - self.deadband_margin),  # DIG zone
+            (boundary2 + self.deadband_margin, pwm_max)  # DUMP zone
+        ]
+        
+        self.get_logger().info(f'Mode zones calculated:')
+        for i, (mode, threshold) in enumerate(zip(self.modes, self.mode_thresholds)):
+            self.get_logger().info(f'  {mode}: {threshold[0]:.0f} - {threshold[1]:.0f}')
     
-    def clamp_throttle(self, value):
-        """Clamp throttle to specified range"""
-        return max(self.throttle_range[0], min(self.throttle_range[1], value))
+    def get_mode_from_pwm(self, pwm_value):
+        """
+        Determine which mode the PWM value corresponds to
+        Returns mode string or None if in deadband
+        """
+        for i, (lower, upper) in enumerate(self.mode_thresholds):
+            if lower <= pwm_value <= upper:
+                return self.modes[i]
+        
+        # If not in any zone, we're in a deadband
+        return None
     
-    def calculate_differential_drive(self, pitch, roll):
+    def call_mode_service(self, mode):
         """
-        Calculate differential drive motor speeds
-        pitch: forward/backward input [-1.0, 1.0]
-        roll: left/right input [-1.0, 1.0]
-        
-        Returns: [back_left, back_right, front_left, front_right]
+        Call the mode switching service asynchronously
         """
-        # Differential drive calculation
-        # pitch: positive = forward, negative = backward
-        # roll: positive = turn right, negative = turn left
+        request = ModeSwitch.Request()
+        request.state = mode
+        request.smoothing_type = self.smoothing_type
         
-        left_speed = pitch - roll
-        right_speed = pitch + roll
+        self.get_logger().info(f'Calling mode service: {mode} with smoothing: {self.smoothing_type}')
         
-        # Clamp to throttle range
-        left_speed = self.clamp_throttle(left_speed)
-        right_speed = self.clamp_throttle(right_speed)
-        
-        # Map to motor sequence: [back_left, back_right, front_left, front_right]
-        motor_speeds = []
-        for motor_name in self.motor_sequence:
-            if 'left' in motor_name:
-                motor_speeds.append(left_speed)
-            elif 'right' in motor_name:
-                motor_speeds.append(right_speed)
+        future = self.mode_client.call_async(request)
+        future.add_done_callback(self.mode_service_callback)
+    
+    def mode_service_callback(self, future):
+        """
+        Handle service response
+        """
+        try:
+            response = future.result()
+            if response.success:
+                self.get_logger().info(f'Mode switch successful: {response.message}')
             else:
-                motor_speeds.append(0.0)
-        
-        return motor_speeds
+                self.get_logger().warn(f'Mode switch failed: {response.message}')
+        except Exception as e:
+            self.get_logger().error(f'Service call failed: {e}')
     
     def rc_callback(self, msg):
-        """Process RC input and publish motor commands"""
-        # Check if we have enough channels
-        if len(msg.data) <= max(self.roll_idx, self.pitch_idx):
+        """Process RC input and switch modes when needed"""
+        # Check if we have the mode channel
+        if len(msg.data) <= self.mode_idx:
             self.get_logger().warn(
-                f'Not enough channels in RC data. Expected at least {max(self.roll_idx, self.pitch_idx) + 1}, got {len(msg.data)}'
+                f'Not enough channels in RC data. Expected at least {self.mode_idx + 1}, got {len(msg.data)}'
             )
             return
         
-        # Extract roll and pitch PWM values
-        roll_pwm = msg.data[self.roll_idx]
-        pitch_pwm = msg.data[self.pitch_idx]
+        # Extract mode channel PWM value
+        mode_pwm = msg.data[self.mode_idx]
         
-        # Convert PWM to normalized values [-1.0, 1.0]
-        roll = self.pwm_to_normalized(roll_pwm)
-        pitch = self.pwm_to_normalized(pitch_pwm)
+        # Determine which mode this PWM corresponds to
+        detected_mode = self.get_mode_from_pwm(mode_pwm)
         
-        # Calculate differential drive motor speeds
-        motor_speeds = self.calculate_differential_drive(pitch, roll)
+        # If in deadband, don't change mode
+        if detected_mode is None:
+            # Optionally log deadband detection (comment out if too verbose)
+            # self.get_logger().debug(f'Mode PWM {mode_pwm} in deadband, keeping current mode')
+            return
         
-        # Publish motor commands
-        motor_msg = Float32MultiArray()
-        motor_msg.data = motor_speeds
-        self.motor_pub.publish(motor_msg)
-        
-        # Debug logging (uncomment if needed)
-        # self.get_logger().info(f'RC: pitch={pitch_pwm}, roll={roll_pwm} | Motors: {[f"{s:.2f}" for s in motor_speeds]}')
+        # If mode changed, call service
+        if detected_mode != self.current_mode:
+            self.get_logger().info(
+                f'Mode switch detected: {self.current_mode} -> {detected_mode} (PWM: {mode_pwm})'
+            )
+            self.current_mode = detected_mode
+            self.call_mode_service(detected_mode)
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DriveController()
+    node = ModeController()
     
     try:
         rclpy.spin(node)

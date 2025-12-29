@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'hardware_interfaces'
+package_name = 'slam'
 
 setup(
     name=package_name,
@@ -12,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'config'), glob('config/*.lua')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
@@ -27,10 +28,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'servo_interface = hardware_interfaces.servo_interface:main',
-            'rc_interface = hardware_interfaces.rc_interface:main',
-            'drive_interface = hardware_interfaces.drive_interface:main',
-            'imu_interface = hardware_interfaces.imu_interface:main'
         ],
     },
 )
