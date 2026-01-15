@@ -1,0 +1,10 @@
+servo_controller:
+  ros__parameters:   
+    # Expected PWM range from RC receiver
+    pwm_range: [1000, 2000]  # min, max
+    
+    # Channel mapping from RC input array
+    channels_sequence: ["roll", "pitch", "throttle", "yaw", "var", "mode"]
+    
+    # RC input topic
+    rc_topic: "rc_input"

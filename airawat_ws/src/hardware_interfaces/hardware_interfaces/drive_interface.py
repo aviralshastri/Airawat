@@ -12,14 +12,13 @@ import time
 class DriveInterface(Node):
     def __init__(self):
         super().__init__('drive_interface')
-        
-        # Declare nested parameters for channel indices
         self.declare_parameter('channel_index.front_left', 0)
         self.declare_parameter('channel_index.front_right', 1)
         self.declare_parameter('channel_index.back_left', 2)
         self.declare_parameter('channel_index.back_right', 3)
         self.declare_parameter('channel_index.wrist', 4)
         self.declare_parameter('channel_index.shoulder', 5)
+        self.declare_parameter('dead_channels', [6,7])
         
         # Declare nested parameters for servo init angles
         self.declare_parameter('servo_init_angle.wrist', 90)
@@ -41,6 +40,8 @@ class DriveInterface(Node):
         self.declare_parameter('max_actuation_angle', 180)
         self.declare_parameter('init_duration', 10.0)
         self.declare_parameter('init_smoothing_type', 'CUBIC')
+
+        self.declare_parameter('angle_error', 10)
         
         # Get channel indices
         self.channel_index = {
@@ -51,6 +52,9 @@ class DriveInterface(Node):
             'wrist': self.get_parameter('channel_index.wrist').value,
             'shoulder': self.get_parameter('channel_index.shoulder').value,
         }
+
+        dead_channels=self.get_parameter('dead_channels').value
+
         
         # Get servo init angles
         self.servo_init_angle = {
@@ -74,7 +78,9 @@ class DriveInterface(Node):
         self.max_actuation_angle = self.get_parameter('max_actuation_angle').value
         self.init_duration = self.get_parameter('init_duration').value
         self.init_smoothing_type = self.get_parameter('init_smoothing_type').value
-        
+
+        self.angle_error=self.get_parameter('angle_error').value
+
         # Separate drive motors and servo arms
         self.drive_motors = ['front_left', 'front_right', 'back_left', 'back_right']
         self.servo_arms = ['wrist', 'shoulder']
@@ -88,13 +94,23 @@ class DriveInterface(Node):
                 channel = self.channel_index[motor_name]
                 self.kit.servo[channel].set_pulse_width_range(self.drive_min_pwm, self.drive_max_pwm)
                 # Initialize to neutral position (90 degrees)
-                self.kit.servo[channel].angle = 90
+                self.kit.servo[channel].angle = 100
+            
+            for dead_channel in dead_channels:
+                self.kit.servo[dead_channel].set_pulse_width_range(self.drive_min_pwm, self.drive_max_pwm)
+                # Initialize dead channels to neutral position (90 degrees)
+                self.kit.servo[dead_channel].angle = 90
+            
             
             # Configure servo arms with servo PWM range and actuation range
             for servo_name in self.servo_arms:
                 channel = self.channel_index[servo_name]
                 self.kit.servo[channel].set_pulse_width_range(self.servo_min_pwm, self.servo_max_pwm)
                 self.kit.servo[channel].actuation_range = self.max_actuation_angle
+            
+            self.kit.servo[self.channel_index['wrist']].angle=self.servo_init_angle['wrist']
+            self.kit.servo[self.channel_index['shoulder']].angle=self.servo_init_angle['shoulder']
+            
             
             self.get_logger().info('ServoKit initialized successfully')
             self.get_logger().info(f'Drive motors mapping: {[(m, self.channel_index[m]) for m in self.drive_motors]}')
@@ -140,8 +156,6 @@ class DriveInterface(Node):
         # Wait a bit for subscriptions to be established
         time.sleep(1.0)
         
-        # Call initialization services for servo arms
-        self._initialize_servo_arms()
     
     def _create_drive_sequence_mapping(self):
         """Create mapping from drive topic sequence index to motor channel"""
@@ -154,41 +168,7 @@ class DriveInterface(Node):
                 self.get_logger().warn(f'Unknown motor name in drive sequence: {motor_name}')
         
         return mapping
-    
-    def _initialize_servo_arms(self):
-        """Call services to initialize servo arms to their init positions"""
-        self.get_logger().info('Initializing servo arms...')
         
-        # Import service type
-        try:
-            from arm_controller.srv import SetJointAngle
-        except ImportError:
-            self.get_logger().error('Failed to import SetJointAngle service. Make sure arm_controller package is available.')
-            return
-        
-        # Create service clients
-        clients = {}
-        for servo_name in self.servo_arms:
-            service_name = f'/set_{servo_name}_angle'
-            clients[servo_name] = self.create_client(SetJointAngle, service_name)
-            
-            # Wait for service to be available
-            if not clients[servo_name].wait_for_service(timeout_sec=5.0):
-                self.get_logger().warn(f'Service {service_name} not available, skipping initialization for {servo_name}')
-                continue
-            
-            # Create request
-            request = SetJointAngle.Request()
-            request.angle = float(self.servo_init_angle[servo_name])
-            request.duration = float(self.init_duration)
-            request.smoothing_type = self.init_smoothing_type
-            
-            # Call service asynchronously
-            future = clients[servo_name].call_async(request)
-            self.get_logger().info(f'Called {service_name} with angle={request.angle}, duration={request.duration}, smoothing={request.smoothing_type}')
-        
-        self.get_logger().info('Servo arm initialization services called')
-    
     def map_to_servo_angle(self, value):
         """
         Maps a float value from range [-1, 1] to an integer in range [0, 180].
@@ -267,16 +247,9 @@ class DriveInterface(Node):
         self.get_logger().info('Returning all motors to neutral position...')
         
         try:
-            # Reset drive motors to 90 degrees
             for motor_name in self.drive_motors:
                 channel = self.channel_index[motor_name]
-                self.kit.servo[channel].angle = 90
-            
-            # Keep servo arms at their current position (don't reset)
-            # If you want to reset them, uncomment below:
-            # for servo_name in self.servo_arms:
-            #     channel = self.channel_index[servo_name]
-            #     self.kit.servo[channel].angle = self.servo_init_angle[servo_name]
+                self.kit.servo[channel].angle = 100
             
         except Exception as e:
             self.get_logger().error(f'Error resetting motors: {e}')

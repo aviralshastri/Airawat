@@ -1,33 +1,18 @@
 # ============================================================================
-# USAGE NOTES
-# ============================================================================
-# 
-# 1. All angles are in DEGREES (not radians)
-# 2. Array order must match joint_names order
-# 3. Each state executes in sequence:
-#    - Smooth trajectory from current position to target angles
-#    - Wait for specified delay
-#    - Move to next state
-# 
-# 4. Delays between states allow for:
-#    - Material settling
-#    - Mechanical stabilization
-#    - Visual inspection
-# 
-# 5. Set delay to 0.0 for the last state in each sequence
-# 
-# 6. To modify behavior:
-#    - Add more states by incrementing state number (state_5, state_6, etc.)
-#    - Adjust angles for your specific arm geometry
-#    - Change durations for faster/slower movements
-#    - Modify delays for operation timing
-# 
+# FILE: config/config.yaml
+# Arm Controller Configuration File
 # ============================================================================
 
 /**:
   ros__parameters:
     # Joint names - must match the order in all angle arrays
     joint_names: ["wrist", "shoulder"]
+
+    # Initial angles to move to on startup (degrees)
+    init_angles: [105.0, 100.0]
+    
+    # Duration for moving from startup (0,0) to init_angles (seconds)
+    init_angle_duration: 5.0
     
     # Duration for transitioning between different arm states (seconds)
     # This is used when moving from current position to the first state of a sequence
@@ -36,53 +21,81 @@
     # Publishing rate for joint commands (Hz)
     publish_rate: 100.0
     
-    ideal_states:      
-    
+    # ========================================================================
+    # IDEAL STATE SEQUENCE
+    # ========================================================================
+    # The arm returns to this safe resting position
+    ideal_states:
       state_1:
-        angles: [180.0, 180.0]
-        durations: [5.0, 5.0]
-        delay: 1.0                    # No delay after final state
+        angles: [180.0, 180.0]        # [wrist, shoulder] in degrees
+        durations: [5.0, 5.0]         # Time to reach each joint angle
+        delay: 1.0                    # Wait time after reaching this state (seconds)
 
+    # ========================================================================
+    # DIG STATE SEQUENCE
+    # ========================================================================
+    # Sequence for digging operation
     dig_states:
       state_1:
-        angles: [180.0, 30.0]          # Initial dig position
+        angles: [0.0, 70.0]         # Initial dig position
         durations: [2.0, 2.0]
-        delay: 0.5
+        delay: 1.0
       
       state_2:
-        angles: [45.0, 60.0]          # Mid dig position
-        durations: [1.5, 1.5]
-        delay: 1.0                    # Hold position while digging
-      
-      state_3:
-        angles: [90.0, 80.0]          # Full dig depth
-        durations: [2.5, 2.5]
-        delay: 0.5
-      
-      state_4:
-        angles: [90.0, 120.0]         # Lift with material
+        angles: [20.0, 60.0]          # Mid dig position
         durations: [2.0, 2.0]
+        delay: 1.0                    # Hold position while digging
+      state_3:
+        angles: [90.0, 90.0]
+        durations: [1.0, 1.0]
         delay: 0.0
 
+    # ========================================================================
+    # DUMP STATE SEQUENCE
+    # ========================================================================
+    # Sequence for dumping material
     dump_states:
       state_1:
-        angles: [45.0, 90.0]          # Move to dump position
-        durations: [2.0, 2.0]
-        delay: 0.5
-      
-      state_2:
-        angles: [60.0, 120.0]         # Raise for dumping
-        durations: [1.5, 1.5]
-        delay: 1.0                    # Hold to let material fall
-      
-      state_3:
-        angles: [75.0, 150.0]         # Full dump angle
-        durations: [1.0, 1.0]
-        delay: 1.5                    # Extra time for complete dump
-      
-      state_4:
-        angles: [45.0, 90.0]          # Return to safe position
+        angles: [0.0, 50.0]          # Move to dump position
         durations: [2.0, 2.0]
         delay: 0.0
 
-
+# ============================================================================
+# USAGE NOTES
+# ============================================================================
+# 
+# 1. All angles are in DEGREES (not radians)
+# 
+# 2. Startup Sequence:
+#    - Node starts with joints at [0.0, 0.0]
+#    - Automatically moves to init_angles over init_angle_duration
+#    - Then waits for service commands
+# 
+# 3. Array order must match joint_names order:
+#    - joint_names: ["wrist", "shoulder"]
+#    - angles: [wrist_angle, shoulder_angle]
+# 
+# 4. Each state executes in sequence:
+#    - Smooth trajectory from current position to target angles
+#    - Wait for specified delay
+#    - Move to next state
+# 
+# 5. Delays between states allow for:
+#    - Material settling
+#    - Mechanical stabilization
+#    - Visual inspection
+# 
+# 6. Set delay to 0.0 for the last state in each sequence
+# 
+# 7. Command Interruption:
+#    - Any new command interrupts current operation immediately
+#    - Emergency stop freezes at current position
+#    - Single joint commands stop state sequences
+# 
+# 8. To modify behavior:
+#    - Add more states by incrementing state number (state_5, state_6, etc.)
+#    - Adjust angles for your specific arm geometry
+#    - Change durations for faster/slower movements
+#    - Modify delays for operation timing
+# 
+# ============================================================================

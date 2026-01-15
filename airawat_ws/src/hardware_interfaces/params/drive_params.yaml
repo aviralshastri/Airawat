@@ -8,10 +8,14 @@ drive_interface:
       back_right: 3
       wrist: 4
       shoulder: 5
+    
+    dead_channels: [6,7]
+
+    angle_error: 10
 
     servo_init_angle:
-      wrist: 90
-      shoulder: 180
+      wrist: 180
+      shoulder: 90
     
     servo_min_pwm: 500
     servo_max_pwm: 2500

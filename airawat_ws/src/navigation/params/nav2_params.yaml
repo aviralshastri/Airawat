@@ -211,7 +211,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       transform_tolerance: 0.5
-      robot_radius: 0.6
+      robot_radius: 0.5
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "voxel_layer", "inflation_layer"]
@@ -274,11 +274,27 @@ planner_server:
   ros__parameters:
     expected_planner_frequency: 5.0
     planner_plugins: ["GridBased"]
+
     GridBased:
-      plugin: "nav2_navfn_planner/NavfnPlanner"
+      plugin: "nav2_smac_planner/SmacPlanner2D"
       tolerance: 0.15
-      use_astar: false
+      downsample_costmap: false
+      downsampling_factor: 1
       allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      terminal_checking_interval: 5000
+      max_planning_time: 2.0
+      cost_travel_multiplier: 2.0
+      use_final_approach_orientation: false
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+        refinement_num: 2
+
 
 behavior_server:
   ros__parameters:

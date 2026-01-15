@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "arm_controller/arm_controller.hpp"
+#include <chrono>
 
 namespace arm_controller
 {
@@ -10,26 +11,30 @@ namespace arm_controller
 ArmController::ArmController() 
     : Node("arm_controller"),
       publish_rate_(100.0),
-      current_process_state_(ProcessState::IDLE),
-      emergency_stop_flag_(false),
-      stop_and_go_to_idle_flag_(false)
+      command_flag_(CommandFlag::NULL_STATE),
+      running_(true)
 {
     RCLCPP_INFO(this->get_logger(), "Initializing Arm Controller Node...");
     
     loadParameters();
     setupPublishersAndServices();
     
+    // Move to initial position
+    moveToInitPosition();
+    
+    // Start command processing thread
+    command_thread_ = std::thread(&ArmController::commandProcessingLoop, this);
+    
     RCLCPP_INFO(this->get_logger(), "Arm Controller Node initialized successfully!");
 }
 
 ArmController::~ArmController()
 {
-    // Cancel any ongoing process
-    cancelCurrentProcess();
+    running_.store(false);
     
-    if (execution_thread_.joinable())
+    if (command_thread_.joinable())
     {
-        execution_thread_.join();
+        command_thread_.join();
     }
 }
 
@@ -44,23 +49,85 @@ void ArmController::loadParameters()
     // Initialize current angles to zero
     current_angles_.resize(joint_names_.size(), 0.0);
     
+    // Get init angles
+    this->declare_parameter<std::vector<double>>("init_angles", std::vector<double>{0.0, 0.0});
+    init_angles_ = this->get_parameter("init_angles").as_double_array();
+    
     // Get state transition duration
-    this->declare_parameter<double>("state_transition_duration", 2.0);
+    this->declare_parameter<double>("state_transition_duration", 5.0);
     state_transition_duration_ = this->get_parameter("state_transition_duration").as_double();
     
-    // Load ideal states
-    this->declare_parameter<std::string>("ideal_states", "");
-    this->declare_parameter<std::string>("dig_states", "");
-    this->declare_parameter<std::string>("dump_states", "");
+    // Get init angle duration
+    this->declare_parameter<double>("init_angle_duration", 5.0);
+    init_angle_duration_ = this->get_parameter("init_angle_duration").as_double();
     
-    // TODO: For complex nested parameters, you might want to load from YAML file directly
-    // For now, we'll provide a simplified parameter loading
-    // In production, use yaml-cpp to load the full configuration
+    // Get publish rate
+    this->declare_parameter<double>("publish_rate", 100.0);
+    publish_rate_ = this->get_parameter("publish_rate").as_double();
+    
+    // Load state sequences
+    loadStateSequence("ideal_states", ideal_states_);
+    loadStateSequence("dig_states", dig_states_);
+    loadStateSequence("dump_states", dump_states_);
     
     RCLCPP_INFO(this->get_logger(), "Loaded %zu joints", joint_names_.size());
     for (size_t i = 0; i < joint_names_.size(); ++i)
     {
-        RCLCPP_INFO(this->get_logger(), "  Joint %zu: %s", i, joint_names_[i].c_str());
+        RCLCPP_INFO(this->get_logger(), "  Joint %zu: %s (init: %.2f°)", 
+                    i, joint_names_[i].c_str(), init_angles_[i]);
+    }
+}
+
+void ArmController::loadStateSequence(const std::string& param_prefix, 
+                                     std::map<std::string, StateConfig>& state_map)
+{
+    // Try to get the number of states
+    int state_num = 1;
+    while (true)
+    {
+        std::string state_name = "state_" + std::to_string(state_num);
+        std::string angles_param = param_prefix + "." + state_name + ".angles";
+        std::string durations_param = param_prefix + "." + state_name + ".durations";
+        std::string delay_param = param_prefix + "." + state_name + ".delay";
+        
+        // Try to declare and get parameters
+        try
+        {
+            this->declare_parameter<std::vector<double>>(angles_param, std::vector<double>{});
+            this->declare_parameter<std::vector<double>>(durations_param, std::vector<double>{});
+            this->declare_parameter<double>(delay_param, 0.0);
+            
+            auto angles = this->get_parameter(angles_param).as_double_array();
+            auto durations = this->get_parameter(durations_param).as_double_array();
+            double delay = this->get_parameter(delay_param).as_double();
+            
+            if (angles.empty() || durations.empty())
+            {
+                break; // No more states
+            }
+            
+            StateConfig config;
+            config.angles = angles;
+            config.durations = durations;
+            config.delay = delay;
+            
+            state_map[state_name] = config;
+            
+            RCLCPP_INFO(this->get_logger(), "Loaded %s.%s: angles=[%.1f, %.1f], delay=%.1fs",
+                        param_prefix.c_str(), state_name.c_str(), 
+                        angles[0], angles[1], delay);
+            
+            state_num++;
+        }
+        catch (const std::exception& e)
+        {
+            break; // No more states
+        }
+    }
+    
+    if (state_map.empty())
+    {
+        RCLCPP_WARN(this->get_logger(), "No states loaded for %s", param_prefix.c_str());
     }
 }
 
@@ -86,15 +153,24 @@ void ArmController::setupPublishersAndServices()
         "emergency_stop",
         std::bind(&ArmController::handleEmergencyStop, this, std::placeholders::_1, std::placeholders::_2));
     
-    stop_and_go_to_ideal_service_ = this->create_service<arm_controller::srv::StopAndGoToIdeal>(
-        "stop_and_go_to_ideal",
-        std::bind(&ArmController::handleStopAndGoToIdeal, this, std::placeholders::_1, std::placeholders::_2));
-    
     get_current_angle_service_ = this->create_service<arm_controller::srv::GetCurrentAngle>(
         "get_current_angle",
         std::bind(&ArmController::handleGetCurrentAngle, this, std::placeholders::_1, std::placeholders::_2));
     
     RCLCPP_INFO(this->get_logger(), "Services registered successfully");
+}
+
+void ArmController::moveToInitPosition()
+{
+    RCLCPP_INFO(this->get_logger(), "Moving to initial position...");
+    
+    // Transition from current (0,0) to init_angles
+    transitionToAngles(init_angles_, 
+                      std::vector<double>(joint_names_.size(), init_angle_duration_),
+                      SmoothingType::QUINTIC);
+    
+    RCLCPP_INFO(this->get_logger(), "Reached initial position: [%.2f, %.2f]", 
+                current_angles_[0], current_angles_[1]);
 }
 
 // ========== Service Callbacks ==========
@@ -105,8 +181,6 @@ void ArmController::handleSetWristAngle(
 {
     RCLCPP_INFO(this->get_logger(), "Service: set_wrist_angle called - angle: %.2f, duration: %.2f, smoothing: %s",
                 request->angle, request->duration, request->smoothing_type.c_str());
-    
-    SmoothingType smoothing = parseSmoothingType(request->smoothing_type);
     
     // Find wrist joint index
     auto it = std::find(joint_names_.begin(), joint_names_.end(), "wrist");
@@ -119,25 +193,19 @@ void ArmController::handleSetWristAngle(
     }
     
     size_t wrist_index = std::distance(joint_names_.begin(), it);
+    SmoothingType smoothing = parseSmoothingType(request->smoothing_type);
     
-    // Cancel current process and start new one
-    cancelCurrentProcess();
-    
-    if (!trySetProcessState(ProcessState::SET_ANGLE))
+    // Set pending command
     {
-        response->success = false;
-        response->message = "Failed to acquire process lock";
-        RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
-        return;
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        pending_joint_command_.joint_index = wrist_index;
+        pending_joint_command_.target_angle = request->angle;
+        pending_joint_command_.duration = request->duration;
+        pending_joint_command_.smoothing = smoothing;
     }
     
-    // Execute in separate thread
-    if (execution_thread_.joinable())
-        execution_thread_.join();
-    
-    execution_thread_ = std::thread([this, wrist_index, request, smoothing]() {
-        setJointAngle(wrist_index, request->angle, request->duration, smoothing);
-    });
+    // Set flag to trigger command
+    command_flag_.store(CommandFlag::SET_WRIST);
     
     response->success = true;
     response->message = "Wrist angle command accepted";
@@ -150,8 +218,6 @@ void ArmController::handleSetShoulderAngle(
     RCLCPP_INFO(this->get_logger(), "Service: set_shoulder_angle called - angle: %.2f, duration: %.2f, smoothing: %s",
                 request->angle, request->duration, request->smoothing_type.c_str());
     
-    SmoothingType smoothing = parseSmoothingType(request->smoothing_type);
-    
     auto it = std::find(joint_names_.begin(), joint_names_.end(), "shoulder");
     if (it == joint_names_.end())
     {
@@ -162,23 +228,19 @@ void ArmController::handleSetShoulderAngle(
     }
     
     size_t shoulder_index = std::distance(joint_names_.begin(), it);
+    SmoothingType smoothing = parseSmoothingType(request->smoothing_type);
     
-    cancelCurrentProcess();
-    
-    if (!trySetProcessState(ProcessState::SET_ANGLE))
+    // Set pending command
     {
-        response->success = false;
-        response->message = "Failed to acquire process lock";
-        RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
-        return;
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        pending_joint_command_.joint_index = shoulder_index;
+        pending_joint_command_.target_angle = request->angle;
+        pending_joint_command_.duration = request->duration;
+        pending_joint_command_.smoothing = smoothing;
     }
     
-    if (execution_thread_.joinable())
-        execution_thread_.join();
-    
-    execution_thread_ = std::thread([this, shoulder_index, request, smoothing]() {
-        setJointAngle(shoulder_index, request->angle, request->duration, smoothing);
-    });
+    // Set flag to trigger command
+    command_flag_.store(CommandFlag::SET_SHOULDER);
     
     response->success = true;
     response->message = "Shoulder angle command accepted";
@@ -191,13 +253,13 @@ void ArmController::handleSetArmState(
     RCLCPP_INFO(this->get_logger(), "Service: set_arm_state called - state: %s, smoothing: %s",
                 request->state.c_str(), request->smoothing_type.c_str());
     
-    ArmState target_state;
+    CommandFlag target_flag;
     if (request->state == "IDEAL")
-        target_state = ArmState::IDEAL;
+        target_flag = CommandFlag::IDEAL;
     else if (request->state == "DIG")
-        target_state = ArmState::DIG;
+        target_flag = CommandFlag::DIG;
     else if (request->state == "DUMP")
-        target_state = ArmState::DUMP;
+        target_flag = CommandFlag::DUMP;
     else
     {
         response->success = false;
@@ -206,24 +268,8 @@ void ArmController::handleSetArmState(
         return;
     }
     
-    SmoothingType smoothing = parseSmoothingType(request->smoothing_type);
-    
-    cancelCurrentProcess();
-    
-    if (!trySetProcessState(ProcessState::STATE_TRANSITION))
-    {
-        response->success = false;
-        response->message = "Failed to acquire process lock";
-        RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
-        return;
-    }
-    
-    if (execution_thread_.joinable())
-        execution_thread_.join();
-    
-    execution_thread_ = std::thread([this, target_state, smoothing]() {
-        executeStateSequence(target_state, smoothing);
-    });
+    // Set flag
+    command_flag_.store(target_flag);
     
     response->success = true;
     response->message = "State transition started";
@@ -233,260 +279,214 @@ void ArmController::handleEmergencyStop(
     const std::shared_ptr<arm_controller::srv::EmergencyStop::Request> request,
     std::shared_ptr<arm_controller::srv::EmergencyStop::Response> response)
 {
-    (void)request; // Unused
+    (void)request;
     
     RCLCPP_WARN(this->get_logger(), "EMERGENCY STOP TRIGGERED!");
     
-    // Check if already in emergency stop
-    if (current_process_state_.load() == ProcessState::EMERGENCY_STOP)
-    {
-        response->success = false;
-        response->message = "Emergency stop already active";
-        RCLCPP_WARN(this->get_logger(), "%s", response->message.c_str());
-        return;
-    }
-    
     // Set emergency flag
-    emergency_stop_flag_.store(true);
-    
-    // Wait for current process to detect and stop
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    command_flag_.store(CommandFlag::EMERGENCY);
     
     response->success = true;
-    response->message = "Emergency stop executed";
-    RCLCPP_INFO(this->get_logger(), "Emergency stop completed");
-}
-
-void ArmController::handleStopAndGoToIdeal(
-    const std::shared_ptr<arm_controller::srv::StopAndGoToIdeal::Request> request,
-    std::shared_ptr<arm_controller::srv::StopAndGoToIdeal::Response> response)
-{
-    RCLCPP_INFO(this->get_logger(), "Service: stop_and_go_to_ideal called - smoothing: %s",
-                request->smoothing_type.c_str());
-    
-    SmoothingType smoothing = parseSmoothingType(request->smoothing_type);
-    
-    // Set stop and go to ideal flag
-    stop_and_go_to_idle_flag_.store(true);
-    
-    // Wait for current process to stop
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    
-    // Clear flag
-    stop_and_go_to_idle_flag_.store(false);
-    
-    // Start ideal state transition
-    if (!trySetProcessState(ProcessState::STOPPING_TO_IDLE))
-    {
-        response->success = false;
-        response->message = "Failed to acquire process lock";
-        RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
-        return;
-    }
-    
-    if (execution_thread_.joinable())
-        execution_thread_.join();
-    
-    execution_thread_ = std::thread([this, smoothing]() {
-        idealStateTrigger(smoothing);
-    });
-    
-    response->success = true;
-    response->message = "Returning to ideal state";
+    response->message = "Emergency stop executed - arm frozen at current position";
+    RCLCPP_INFO(this->get_logger(), "Emergency stop completed, flag cleared");
 }
 
 void ArmController::handleGetCurrentAngle(
     const std::shared_ptr<arm_controller::srv::GetCurrentAngle::Request> request,
     std::shared_ptr<arm_controller::srv::GetCurrentAngle::Response> response)
 {
-    (void)request; // Unused
+    (void)request;
     
-    std::lock_guard<std::mutex> lock(process_mutex_);
+    std::lock_guard<std::mutex> lock(command_mutex_);
     response->joint_names = joint_names_;
     response->angles = current_angles_;
     
-    RCLCPP_INFO(this->get_logger(), "Current angles requested");
+    RCLCPP_INFO(this->get_logger(), "Current angles: [%.2f, %.2f]", 
+                current_angles_[0], current_angles_[1]);
 }
 
-// ========== Core Functions ==========
+// ========== Command Processing ==========
 
-void ArmController::setJointAngle(size_t joint_index, double target_angle, double duration, SmoothingType smoothing)
+void ArmController::commandProcessingLoop()
 {
-    RCLCPP_INFO(this->get_logger(), "Executing setJointAngle for joint %zu to %.2f degrees", 
-                joint_index, target_angle);
+    rclcpp::Rate rate(10); // Check for commands at 10Hz
     
-    std::vector<double> start_angles = current_angles_;
-    std::vector<double> target_angles = current_angles_;
-    std::vector<double> durations(joint_names_.size(), duration);
-    
-    target_angles[joint_index] = target_angle;
-    
-    executeSmoothTrajectory(start_angles, target_angles, durations, smoothing);
-    
-    setProcessStateIdle();
-}
-
-void ArmController::executeStateSequence(ArmState state, SmoothingType smoothing)
-{
-    switch (state)
+    while (running_.load() && rclcpp::ok())
     {
-        case ArmState::IDEAL:
-            idealStateTrigger(smoothing);
-            break;
-        case ArmState::DIG:
-            digStateTrigger(smoothing);
-            break;
-        case ArmState::DUMP:
-            dumpStateTrigger(smoothing);
-            break;
+        CommandFlag current_flag = command_flag_.load();
+        
+        if (current_flag != CommandFlag::NULL_STATE)
+        {
+            RCLCPP_INFO(this->get_logger(), "Processing command: %s", 
+                        commandFlagToString(current_flag).c_str());
+            
+            // Handle the command
+            switch (current_flag)
+            {
+                case CommandFlag::EMERGENCY:
+                    RCLCPP_WARN(this->get_logger(), "Emergency stop - freezing at current position");
+                    clearFlag();
+                    break;
+                    
+                case CommandFlag::IDEAL:
+                    clearFlag();
+                    idealStateTrigger();
+                    break;
+                    
+                case CommandFlag::DIG:
+                    clearFlag();
+                    digStateTrigger();
+                    break;
+                    
+                case CommandFlag::DUMP:
+                    clearFlag();
+                    dumpStateTrigger();
+                    break;
+                    
+                case CommandFlag::SET_WRIST:
+                case CommandFlag::SET_SHOULDER:
+                {
+                    SingleJointCommand cmd;
+                    {
+                        std::lock_guard<std::mutex> lock(command_mutex_);
+                        cmd = pending_joint_command_;
+                    }
+                    clearFlag();
+                    setJointAngle(cmd.joint_index, cmd.target_angle, cmd.duration, cmd.smoothing);
+                    break;
+                }
+                    
+                default:
+                    break;
+            }
+        }
+        
+        rate.sleep();
+    }
+}
+
+bool ArmController::checkAndHandleFlag()
+{
+    CommandFlag current_flag = command_flag_.load();
+    
+    if (current_flag != CommandFlag::NULL_STATE)
+    {
+        RCLCPP_INFO(this->get_logger(), "Flag detected during operation: %s", 
+                    commandFlagToString(current_flag).c_str());
+        
+        if (current_flag == CommandFlag::EMERGENCY)
+        {
+            RCLCPP_WARN(this->get_logger(), "Emergency stop - exiting current operation");
+            clearFlag();
+            return true; // Stop execution
+        }
+        
+        // For other commands, let the command processing loop handle them
+        return true; // Stop current execution
     }
     
-    setProcessStateIdle();
+    return false; // Continue execution
 }
 
-void ArmController::idealStateTrigger(SmoothingType smoothing)
+void ArmController::clearFlag()
+{
+    command_flag_.store(CommandFlag::NULL_STATE);
+}
+
+// ========== Core State Execution Functions ==========
+
+void ArmController::idealStateTrigger()
 {
     RCLCPP_INFO(this->get_logger(), "Executing IDEAL state sequence");
-    
-    // TODO: Load from parameters and execute sequence
-    // For now, simplified example with hardcoded values
-    
-    // Example: Move to state_1
-    std::vector<double> target_angles = {10.0, 10.0}; // From params
-    std::vector<double> durations = {2.0, 2.0};
-    
-    // First transition to state_1
-    executeSmoothTrajectory(current_angles_, target_angles, durations, smoothing);
-    
-    if (shouldStopExecution())
-    {
-        RCLCPP_WARN(this->get_logger(), "IDEAL sequence interrupted");
-        return;
-    }
-    
-    // Delay after reaching state_1
-    RCLCPP_INFO(this->get_logger(), "Delaying for 1 second...");
-    rclcpp::sleep_for(std::chrono::seconds(1));
-    
-    if (shouldStopExecution())
-    {
-        RCLCPP_WARN(this->get_logger(), "IDEAL sequence interrupted during delay");
-        return;
-    }
-    
-    // TODO: Continue with more states from config file
-    // Example: Move to state_2
-    // target_angles = {20.0, 20.0};
-    // executeSmoothTrajectory(current_angles_, target_angles, durations, smoothing);
-    
+    executeStateSequence(ideal_states_);
     RCLCPP_INFO(this->get_logger(), "IDEAL state sequence completed");
 }
 
-void ArmController::digStateTrigger(SmoothingType smoothing)
+void ArmController::digStateTrigger()
 {
     RCLCPP_INFO(this->get_logger(), "Executing DIG state sequence");
-    
-    // TODO: Load from parameters and execute sequence
-    // Similar structure to idealStateTrigger
-    
-    // Example state sequence
-    std::vector<double> target_angles = {30.0, 40.0};
-    std::vector<double> durations = {2.5, 2.5};
-    
-    executeSmoothTrajectory(current_angles_, target_angles, durations, smoothing);
-    
-    if (shouldStopExecution())
-    {
-        RCLCPP_WARN(this->get_logger(), "DIG sequence interrupted");
-        return;
-    }
-    
+    executeStateSequence(dig_states_);
     RCLCPP_INFO(this->get_logger(), "DIG state sequence completed");
 }
 
-void ArmController::dumpStateTrigger(SmoothingType smoothing)
+void ArmController::dumpStateTrigger()
 {
     RCLCPP_INFO(this->get_logger(), "Executing DUMP state sequence");
-    
-    // TODO: Load from parameters and execute sequence
-    // Similar structure to idealStateTrigger
-    
-    // Example state sequence
-    std::vector<double> target_angles = {45.0, 45.0};
-    std::vector<double> durations = {2.0, 2.0};
-    
-    executeSmoothTrajectory(current_angles_, target_angles, durations, smoothing);
-    
-    if (shouldStopExecution())
-    {
-        RCLCPP_WARN(this->get_logger(), "DUMP sequence interrupted");
-        return;
-    }
-    
+    executeStateSequence(dump_states_);
     RCLCPP_INFO(this->get_logger(), "DUMP state sequence completed");
 }
 
-// ========== Process Management ==========
-
-bool ArmController::trySetProcessState(ProcessState new_state)
+void ArmController::setJointAngle(size_t joint_index, double target_angle, 
+                                 double duration, SmoothingType smoothing)
 {
-    std::lock_guard<std::mutex> lock(process_mutex_);
-    current_process_state_.store(new_state);
-    RCLCPP_INFO(this->get_logger(), "Process state changed to: %s", 
-                processStateToString(new_state).c_str());
+    RCLCPP_INFO(this->get_logger(), "Setting joint %zu (%s) to %.2f° over %.2fs", 
+                joint_index, joint_names_[joint_index].c_str(), target_angle, duration);
+    
+    std::vector<double> target_angles = current_angles_;
+    target_angles[joint_index] = target_angle;
+    
+    std::vector<double> durations(joint_names_.size(), duration);
+    
+    transitionToAngles(target_angles, durations, smoothing);
+    
+    RCLCPP_INFO(this->get_logger(), "Joint angle command completed");
+}
+
+// ========== State Sequence Execution ==========
+
+bool ArmController::executeStateSequence(const std::map<std::string, StateConfig>& states)
+{
+    if (states.empty())
+    {
+        RCLCPP_WARN(this->get_logger(), "No states to execute in sequence");
+        return false;
+    }
+    
+    // Iterate through states in order
+    for (const auto& [state_name, config] : states)
+    {
+        RCLCPP_INFO(this->get_logger(), "Transitioning to %s", state_name.c_str());
+        
+        // Transition to this state's angles
+        if (!transitionToAngles(config.angles, config.durations, SmoothingType::CUBIC))
+        {
+            RCLCPP_WARN(this->get_logger(), "State sequence interrupted during transition to %s", 
+                        state_name.c_str());
+            return false;
+        }
+        
+        // Check flag after transition
+        if (checkAndHandleFlag())
+        {
+            return false;
+        }
+        
+        // Delay at this state
+        if (config.delay > 0.0)
+        {
+            RCLCPP_INFO(this->get_logger(), "Holding at %s for %.2fs", state_name.c_str(), config.delay);
+            if (!sleepWithFlagCheck(config.delay))
+            {
+                RCLCPP_WARN(this->get_logger(), "State sequence interrupted during delay at %s", 
+                            state_name.c_str());
+                return false;
+            }
+        }
+        
+        // Check flag after delay
+        if (checkAndHandleFlag())
+        {
+            return false;
+        }
+    }
+    
     return true;
 }
 
-void ArmController::cancelCurrentProcess()
+bool ArmController::transitionToAngles(const std::vector<double>& target_angles, 
+                                      const std::vector<double>& durations,
+                                      SmoothingType smoothing)
 {
-    ProcessState current = current_process_state_.load();
-    
-    if (current != ProcessState::IDLE && current != ProcessState::EMERGENCY_STOP)
-    {
-        RCLCPP_INFO(this->get_logger(), "Canceling current process: %s", 
-                    processStateToString(current).c_str());
-        emergency_stop_flag_.store(true);
-        
-        // Wait for process to stop
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
-        emergency_stop_flag_.store(false);
-        RCLCPP_INFO(this->get_logger(), "Current process canceled");
-    }
-}
-
-void ArmController::setProcessStateIdle()
-{
-    std::lock_guard<std::mutex> lock(process_mutex_);
-    current_process_state_.store(ProcessState::IDLE);
-    RCLCPP_INFO(this->get_logger(), "Process completed, state set to IDLE");
-}
-
-bool ArmController::shouldStopExecution()
-{
-    return emergency_stop_flag_.load() || stop_and_go_to_idle_flag_.load();
-}
-
-// ========== Publishing ==========
-
-void ArmController::publishJointAngles(const std::vector<double>& angles)
-{
-    sensor_msgs::msg::JointState msg;
-    msg.header.stamp = this->now();
-    msg.name = joint_names_;
-    msg.position = angles;
-    
-    joint_pub_->publish(msg);
-}
-
-void ArmController::executeSmoothTrajectory(
-    const std::vector<double>& start_angles,
-    const std::vector<double>& target_angles,
-    const std::vector<double>& durations,
-    SmoothingType smoothing)
-{
-    RCLCPP_INFO(this->get_logger(), "Generating smooth trajectory...");
-    
     // Generate trajectories for each joint
     std::vector<std::vector<double>> trajectories;
     size_t max_samples = 0;
@@ -497,43 +497,30 @@ void ArmController::executeSmoothTrajectory(
         
         if (smoothing == SmoothingType::QUINTIC)
         {
-            traj = generateSmoothTrajectory(start_angles[i], target_angles[i], durations[i], publish_rate_);
-            RCLCPP_INFO(this->get_logger(), "Joint %s: QUINTIC trajectory with %zu samples", 
-                        joint_names_[i].c_str(), traj.size());
+            traj = generateSmoothTrajectory(current_angles_[i], target_angles[i], 
+                                           durations[i], publish_rate_);
         }
         else
         {
-            traj = generateSmoothTrajectoryCubic(start_angles[i], target_angles[i], durations[i], publish_rate_);
-            RCLCPP_INFO(this->get_logger(), "Joint %s: CUBIC trajectory with %zu samples", 
-                        joint_names_[i].c_str(), traj.size());
+            traj = generateSmoothTrajectoryCubic(current_angles_[i], target_angles[i], 
+                                                durations[i], publish_rate_);
         }
         
         trajectories.push_back(traj);
         max_samples = std::max(max_samples, traj.size());
     }
     
-    RCLCPP_INFO(this->get_logger(), "Publishing trajectory with %zu samples at %.1f Hz", 
-                max_samples, publish_rate_);
-    
-    // Publish at 100 Hz
+    // Publish trajectory at publish_rate Hz
     rclcpp::Rate rate(publish_rate_);
     
     for (size_t sample = 0; sample < max_samples; ++sample)
     {
-        // Check for stop conditions
-        if (shouldStopExecution())
+        // Check flag
+        if (checkAndHandleFlag())
         {
-            RCLCPP_WARN(this->get_logger(), "Trajectory execution stopped at sample %zu/%zu", 
+            RCLCPP_WARN(this->get_logger(), "Trajectory interrupted at sample %zu/%zu", 
                         sample, max_samples);
-            
-            // Clear flags
-            if (emergency_stop_flag_.load())
-            {
-                emergency_stop_flag_.store(false);
-                current_process_state_.store(ProcessState::IDLE);
-            }
-            
-            return;
+            return false;
         }
         
         // Get angles at this sample
@@ -548,7 +535,7 @@ void ArmController::executeSmoothTrajectory(
         
         // Update current angles
         {
-            std::lock_guard<std::mutex> lock(process_mutex_);
+            std::lock_guard<std::mutex> lock(command_mutex_);
             current_angles_ = angles;
         }
         
@@ -558,7 +545,38 @@ void ArmController::executeSmoothTrajectory(
         rate.sleep();
     }
     
-    RCLCPP_INFO(this->get_logger(), "Trajectory execution completed");
+    return true;
+}
+
+bool ArmController::sleepWithFlagCheck(double seconds)
+{
+    auto start = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration<double>(seconds);
+    
+    rclcpp::Rate rate(20); // Check flag 20 times per second during sleep
+    
+    while (std::chrono::steady_clock::now() - start < duration)
+    {
+        if (checkAndHandleFlag())
+        {
+            return false;
+        }
+        rate.sleep();
+    }
+    
+    return true;
+}
+
+// ========== Publishing ==========
+
+void ArmController::publishJointAngles(const std::vector<double>& angles)
+{
+    sensor_msgs::msg::JointState msg;
+    msg.header.stamp = this->now();
+    msg.name = joint_names_;
+    msg.position = angles;
+    
+    joint_pub_->publish(msg);
 }
 
 // ========== Utility ==========
@@ -569,27 +587,23 @@ SmoothingType ArmController::parseSmoothingType(const std::string& type_str)
     {
         return SmoothingType::QUINTIC;
     }
-    else if (type_str == "CUBIC")
-    {
-        return SmoothingType::CUBIC;
-    }
     else
     {
-        RCLCPP_WARN(this->get_logger(), "Unknown smoothing type '%s', defaulting to CUBIC", 
-                    type_str.c_str());
         return SmoothingType::CUBIC; // Default
     }
 }
 
-std::string ArmController::processStateToString(ProcessState state)
+std::string ArmController::commandFlagToString(CommandFlag flag)
 {
-    switch (state)
+    switch (flag)
     {
-        case ProcessState::IDLE: return "IDLE";
-        case ProcessState::STATE_TRANSITION: return "STATE_TRANSITION";
-        case ProcessState::SET_ANGLE: return "SET_ANGLE";
-        case ProcessState::EMERGENCY_STOP: return "EMERGENCY_STOP";
-        case ProcessState::STOPPING_TO_IDLE: return "STOPPING_TO_IDLE";
+        case CommandFlag::NULL_STATE: return "NULL_STATE";
+        case CommandFlag::EMERGENCY: return "EMERGENCY";
+        case CommandFlag::IDEAL: return "IDEAL";
+        case CommandFlag::DIG: return "DIG";
+        case CommandFlag::DUMP: return "DUMP";
+        case CommandFlag::SET_WRIST: return "SET_WRIST";
+        case CommandFlag::SET_SHOULDER: return "SET_SHOULDER";
         default: return "UNKNOWN";
     }
 }

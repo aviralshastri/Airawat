@@ -54,11 +54,6 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install config files
-install(DIRECTORY config
-  DESTINATION share/${PROJECT_NAME}
-)
-
 # Install header files
 install(DIRECTORY include/
   DESTINATION include

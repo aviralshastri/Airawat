@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'drive_controller = manual_controller.drive_controller:main'
+            'drive_controller = manual_controller.drive_controller:main',
+            'servo_controller = manual_controller.servo_controller:main'
         ],
     },
 )
